@@ -1,59 +1,34 @@
 import type { Nation, VehicleClass, TreeResponse, Vehicle, VehiclesFilter, UserProfile } from '@/types'
 
-// W DEV bez VITE_API_BASE_URL użyjemy proxy Vite (ROOT = '' → odwołania /api/...).
-// Na prod lub gdy zmienna ustawiona, korzystamy z pełnej bazy URL.
-const provided = (import.meta.env.VITE_API_BASE_URL ?? '').trim()
-const useProxy = import.meta.env.DEV && !provided
-const ROOT = (useProxy ? '' : (provided || 'http://localhost:5000')).replace(/\/+$/, '')
+const ROOT = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000').replace(/\/+$/, '')
 const API = ROOT.endsWith('/api') ? ROOT : `${ROOT}/api`
 
-// Prosta trwałość tokena (przetrwa odświeżenie strony)
 let AUTH: string | null = null
-try {
-  AUTH = localStorage.getItem('gt_token')
-} catch {
-  AUTH = null
-}
 
 export function setAuthToken(tok: string | null) {
   AUTH = tok
-  try {
-    if (tok) localStorage.setItem('gt_token', tok)
-    else localStorage.removeItem('gt_token')
-  } catch {
-    /* ignore storage errors */
-  }
 }
 
-async function req<T>(path: string, init: RequestInit = {}, timeoutMs = 20000): Promise<T> {
+async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    ...(init.headers as Record<string, string> | undefined),
+    ...(init.headers as any),
   }
   if (AUTH) headers['Authorization'] = `Bearer ${AUTH}`
 
   // pozwól wołać zarówno z "/api/xxx" jak i "/xxx"
   const url = path.startsWith('/api') ? `${ROOT}${path}` : `${API}${path}`
 
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
-
-  try {
-    const r = await fetch(url, { ...init, headers, signal: controller.signal })
-    if (!r.ok) {
-      let msg = `${r.status} ${r.statusText}`
-      try {
-        const j = await r.json()
-        if ((j as any)?.error) msg = (j as any).error
-      } catch {
-        /* no json body */
-      }
-      throw new Error(msg)
-    }
-    return r.json() as Promise<T>
-  } finally {
-    clearTimeout(timer)
+  const r = await fetch(url, { ...init, headers })
+  if (!r.ok) {
+    let msg = `${r.status} ${r.statusText}`
+    try {
+      const j = await r.json()
+      if ((j as any)?.error) msg = (j as any).error
+    } catch {}
+    throw new Error(msg)
   }
+  return r.json() as Promise<T>
 }
 
 export const api = {
@@ -100,7 +75,7 @@ export const api = {
   me(): Promise<{ user: { id: number; email: string } }> { return req('/auth/me') },
   logout(): Promise<{ ok: boolean }> { return req('/auth/logout', { method: 'POST' }) },
 
-  // ---- profile (backend u Ciebie już ma te endpointy – zostawiamy)
+  // ---- profile (na backendzie już masz te endpointy)
   getProfile(): Promise<UserProfile> { return req('/profile') },
   saveProfile(p: UserProfile): Promise<{ ok: boolean }> {
     return req('/profile', { method: 'PUT', body: JSON.stringify(p) })

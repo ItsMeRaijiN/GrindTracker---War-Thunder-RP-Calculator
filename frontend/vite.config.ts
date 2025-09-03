@@ -5,7 +5,7 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), 'VITE_')
   const apiBase = (env.VITE_API_BASE_URL || 'http://localhost:5000').replace(/\/+$/, '')
 
-  // jeśli budujemy pod GitHub Pages, ustaw base na /<repo>/
+  // GitHub Pages: aplikacja będzie pod /<repo>/
   const isPages = process.env.GITHUB_PAGES === 'true'
   const repo = process.env.GITHUB_REPOSITORY?.split('/')[1] ?? ''
   const base = isPages && mode === 'production' ? `/${repo}/` : '/'

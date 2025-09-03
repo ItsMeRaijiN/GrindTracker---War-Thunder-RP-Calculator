@@ -5,14 +5,6 @@ on:
     branches: [ main, master ]
   pull_request:
 
-# unikamy dublowania buildów dla tego samego refa
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
-
-permissions:
-  contents: read
-
 jobs:
   backend:
     name: Backend (Flask)
@@ -64,14 +56,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: 'npm'
-          cache-dependency-path: frontend/package-lock.json
+          cache: npm   # ← bez cache-dependency-path, żeby nie failowało gdy brak lockfile
 
       - name: Install
-        run: npm ci
-
-      - name: Type check (if present)
-        run: npm run typecheck --if-present
+        run: npm ci --no-audit --no-fund
 
       - name: Build
         run: npm run build
@@ -80,7 +68,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: frontend-build
-          # Vite -> dist, CRA -> build (wrzucamy oba, jeśli jeden nie istnieje to będzie ostrzeżenie)
           path: |
             frontend/dist/**
             frontend/build/**

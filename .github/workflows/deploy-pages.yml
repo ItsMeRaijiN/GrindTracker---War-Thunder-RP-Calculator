@@ -19,30 +19,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: 'npm'
-          cache-dependency-path: frontend/package-lock.json
-
-      # flaga dla Vite (ustawia base=/repo/) + baza API w runtime
-      - name: Configure env for Vite/Pages
-        working-directory: frontend
-        run: |
-          echo "GITHUB_PAGES=true" >> $GITHUB_ENV
-          # Zdefiniuj zmienną repo: Settings → Secrets and variables → Actions → Variables → API_BASE_URL
-          echo "VITE_API_BASE_URL=${{ vars.API_BASE_URL }}" >> $GITHUB_ENV
+          cache: npm   # ← bez cache-dependency-path
 
       - name: Build
         working-directory: frontend
+        env:
+          # Ustaw w repo → Settings → Variables → Actions → API_BASE_URL
+          VITE_API_BASE_URL: ${{ vars.API_BASE_URL }}
+          # Dla vite.config.ts – ustawia proper base '/<repo>/'
+          GITHUB_PAGES: 'true'
         run: |
-          npm ci
+          npm ci --no-audit --no-fund
           npm run build
 
       - name: Upload artifact for Pages
         uses: actions/upload-pages-artifact@v3
         with:
-          # Vite domyślnie: dist; jeśli używasz CRA, zmień na frontend/build
           path: frontend/dist
 
   deploy:
