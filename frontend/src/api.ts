@@ -1,55 +1,60 @@
-import type { Nation, VehicleClass } from './types'
+import type { Nation, VehicleClass, TreeResponse, Vehicle, VehiclesFilter, UserProfile } from '@/types'
 
-export type Rank = { id: number; label: string }
-export type LoginResult = { token: string; user: { id: number; email: string } }
+const BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'
+let AUTH: string | null = null
 
-const BASE = import.meta.env.VITE_API_BASE_URL || ''
-
-let authToken: string | null = null
-export function setAuthToken(token: string | null) {
-  authToken = token
-  if (token) sessionStorage.setItem('gt_jwt', token)
-  else sessionStorage.removeItem('gt_jwt')
+export function setAuthToken(tok: string | null) {
+  AUTH = tok
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const url = new URL((BASE.endsWith('/') ? BASE.slice(0, -1) : BASE) + path, window.location.origin)
-  const headers: Record<string, string> = { 'Accept': 'application/json' }
-  if (init?.body && !(init.body instanceof FormData)) headers['Content-Type'] = 'application/json'
-  if (authToken) headers['Authorization'] = `Bearer ${authToken}`
-
-  const r = await fetch(url.toString(), { ...init, headers: { ...headers, ...(init?.headers || {}) } })
-  const isJson = r.headers.get('content-type')?.includes('application/json')
+async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(init.headers as any),
+  }
+  if (AUTH) headers['Authorization'] = `Bearer ${AUTH}`
+  const r = await fetch(`${BASE}${path}`, { ...init, headers })
   if (!r.ok) {
     let msg = `${r.status} ${r.statusText}`
-    if (isJson) {
-      try { const j: any = await r.json(); msg = j?.error || msg } catch {}
-    }
+    try { const j = await r.json(); if (j?.error) msg = j.error } catch {}
     throw new Error(msg)
   }
-  return (isJson ? r.json() : (undefined as any)) as Promise<T>
+  return r.json() as Promise<T>
 }
-
-const get = <T,>(p: string, q?: Record<string, string | number | boolean | undefined>) => {
-  const url = new URL((BASE.endsWith('/') ? BASE.slice(0, -1) : BASE) + p, window.location.origin)
-  if (q) Object.entries(q).forEach(([k, v]) => { if (v !== undefined && v !== null) url.searchParams.set(k, String(v)) })
-  return request<T>(url.pathname + url.search)
-}
-const post = <T,>(p: string, body?: any) =>
-  request<T>(p, { method: 'POST', body: body instanceof FormData ? body : JSON.stringify(body ?? {}) })
 
 export const api = {
-  nations: () => get<Nation[]>('/api/nations'),
-  classes: () => get<VehicleClass[]>('/api/classes'),
-  ranks: () => get<Rank[]>('/api/ranks'),
-  tree: (nation: string, vclass: string) =>
-    get('/api/tree', { nation, class: vclass }),
+  nations(): Promise<Nation[]> { return req('/api/nations') },
+  classes(): Promise<VehicleClass[]> { return req('/api/classes') },
+  ranks(): Promise<{id:number; label:string}[]> { return req('/api/ranks') },
 
-  // --- auth ---
-  register: (email: string, password: string) =>
-    post<LoginResult>('/api/auth/register', { email, password }),
-  login: (email: string, password: string) =>
-    post<LoginResult>('/api/auth/login', { email, password }),
-  me: () => get<{ user: { id: number; email: string } }>('/api/auth/me'),
-  logout: () => post<{ ok: true }>('/api/auth/logout'),
+  tree(nation: string, vclass: string): Promise<TreeResponse> {
+    const p = new URLSearchParams({ nation, class: vclass })
+    return req(`/api/tree?${p.toString()}`)
+  },
+
+  vehicles(f: VehiclesFilter): Promise<Vehicle[]> {
+    const p = new URLSearchParams()
+    if (f.nation) p.set('nation', f.nation)
+    if (f.class) p.set('class', f.class)
+    if (typeof f.rank === 'number') p.set('rank', String(f.rank))
+    if (f.type) p.set('type', f.type)
+    if (f.q) p.set('q', f.q)
+    return req(`/api/vehicles?${p.toString()}`)
+  },
+
+  // ---- auth
+  register(email: string, password: string): Promise<{token: string; user: {id:number; email:string}}> {
+    return req('/api/auth/register', { method: 'POST', body: JSON.stringify({ email, password }) })
+  },
+  login(email: string, password: string): Promise<{token: string; user: {id:number; email:string}}> {
+    return req('/api/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) })
+  },
+  me(): Promise<{user: {id:number; email:string}}> { return req('/api/auth/me') },
+  logout(): Promise<{ok: boolean}> { return req('/api/auth/logout', { method: 'POST' }) },
+
+  // ---- profile
+  getProfile(): Promise<UserProfile> { return req('/api/profile') },
+  saveProfile(p: UserProfile): Promise<{ok: boolean}> {
+    return req('/api/profile', { method: 'PUT', body: JSON.stringify(p) })
+  },
 }

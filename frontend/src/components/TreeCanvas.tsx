@@ -1,8 +1,14 @@
-import React, { useMemo, useRef, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import type { Edge, TreeResponse, Vehicle } from '@/types'
 import { useProgress } from '@/useProgress'
 
-type Props = { data: TreeResponse | null }
+type Props = {
+  data: TreeResponse | null
+  /** ID węzłów/wariantów do wyróżnienia (np. z wyszukiwarki) */
+  highlights?: number[]
+  /** gdy true: mocno wygaszamy elementy niebędące w highlights */
+  filterToHighlights?: boolean
+}
 type Pos = { x: number; y: number }
 
 const NODE_W = 170
@@ -10,11 +16,11 @@ const NODE_H = 84
 const GAP_X = 120
 const GAP_Y = 52
 
-// powiększony panel wariantów
+// powiększony panel wariantów – miejsce na paski postępu i napisy
 const VAR_W = 320
 const VAR_ROW_H = 72
 
-export default function TreeCanvas({ data }: Props) {
+export default function TreeCanvas({ data, highlights = [], filterToHighlights = false }: Props) {
   const progress = useProgress()
 
   const allNodes: Vehicle[] = data?.nodes ?? []
@@ -23,7 +29,10 @@ export default function TreeCanvas({ data }: Props) {
     [allNodes]
   )
 
-  // warianty (pojazdy w folderze) – z całej listy
+  // zbiór id do podświetlenia
+  const highlightSet = useMemo(() => new Set<number>(highlights ?? []), [highlights])
+
+  // warianty (pojazdy "w folderze") – z całej listy
   const variantsMap = useMemo(() => {
     const m = new Map<number, Vehicle[]>()
     for (const v of allNodes) {
@@ -81,6 +90,20 @@ export default function TreeCanvas({ data }: Props) {
     })
   }
 
+  // automatycznie rozwiń foldery, jeżeli w środku są dopasowania
+  useEffect(() => {
+    if (highlightSet.size === 0) return
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      for (const [parentId, arr] of variantsMap) {
+        if (arr.some((v) => highlightSet.has(v.id))) {
+          next.add(parentId)
+        }
+      }
+      return next
+    })
+  }, [highlightSet, variantsMap])
+
   // zoom/pan
   const [scale, setScale] = useState(1)
   const [tx, setTx] = useState(40)
@@ -123,7 +146,7 @@ export default function TreeCanvas({ data }: Props) {
     return progress.getDone(id) || (total > 0 && cur >= total)
   }
 
-  // NOWE: wymagania = krawędzie + rodzic folderu + poprzedni wariant (o ile istnieje)
+  // wymagania = krawędzie + rodzic folderu + poprzedni wariant (o ile istnieje)
   const requiredParents = (v: Vehicle): number[] => {
     const fromEdges = parentsMap.get(v.id) ?? []
     const folderParent = v.folder_of ? [v.folder_of] : []
@@ -243,9 +266,16 @@ export default function TreeCanvas({ data }: Props) {
               editRP(v)
             }
 
+            const highlighted = highlightSet.has(v.id)
+            const dim = filterToHighlights && !highlighted && !(vars.some(x => highlightSet.has(x.id)))
+
             return (
-              <g key={v.id} transform={`translate(${pos.x}, ${pos.y})`}>
+              <g key={v.id} transform={`translate(${pos.x}, ${pos.y})`} className={dim ? 'opacity-30' : ''}>
                 <g className={locked ? 'cursor-not-allowed opacity-80' : 'cursor-pointer'} onClick={onClickTile}>
+                  {/* highlight aura */}
+                  {highlighted && (
+                    <rect width={NODE_W+6} height={NODE_H+6} x={-3} y={-3} rx={14} className="fill-transparent stroke-emerald-400" strokeWidth={2} />
+                  )}
                   <rect width={NODE_W} height={NODE_H} rx={12} className={rectCls} strokeWidth={1} />
                   <text x={NODE_W / 2} y={22} textAnchor="middle" className="fill-white text-[12px]">
                     {v.name}
@@ -287,16 +317,21 @@ export default function TreeCanvas({ data }: Props) {
                 {hasVariants && isOpen && (
                   <g transform={`translate(${NODE_W + 14}, -6)`}>
                     <rect width={VAR_W} height={vars.length * VAR_ROW_H + 10} rx={12} className="fill-neutral-800/95 stroke-white/15" />
-                    {vars.map((vv, idx) => (
-                      <VariantRow
-                        key={vv.id}
-                        v={vv}
-                        y={8 + idx * VAR_ROW_H}
-                        idToNode={idToNode}
-                        parentsMap={parentsMap}
-                        prevVariantId={idx > 0 ? vars[idx - 1].id : null}
-                      />
-                    ))}
+                    {vars.map((vv, idx) => {
+                      const vHighlighted = highlightSet.has(vv.id)
+                      return (
+                        <VariantRow
+                          key={vv.id}
+                          v={vv}
+                          y={8 + idx * VAR_ROW_H}
+                          idToNode={idToNode}
+                          parentsMap={parentsMap}
+                          prevVariantId={idx > 0 ? vars[idx - 1].id : null}
+                          highlighted={vHighlighted}
+                          dim={filterToHighlights && !vHighlighted}
+                        />
+                      )
+                    })}
                   </g>
                 )}
               </g>
@@ -314,12 +349,16 @@ function VariantRow({
   idToNode,
   parentsMap,
   prevVariantId,
+  highlighted,
+  dim,
 }: {
   v: Vehicle
   y: number
   idToNode: Map<number, Vehicle>
   parentsMap: Map<number, number[]>
   prevVariantId: number | null
+  highlighted: boolean
+  dim: boolean
 }) {
   const progress = useProgress()
   const total = v.rp_cost ?? 0
@@ -378,9 +417,13 @@ function VariantRow({
   return (
     <g
       transform={`translate(0, ${y})`}
-      className={canResearch ? 'cursor-pointer' : 'cursor-not-allowed opacity-80'}
+      className={`${canResearch ? 'cursor-pointer' : 'cursor-not-allowed opacity-80'} ${dim ? 'opacity-30' : ''}`}
       onClick={edit}
     >
+      {/* highlight aura */}
+      {highlighted && (
+        <rect x={6} y={-2} width={VAR_W - 12} height={VAR_ROW_H - 8} rx={12} className="fill-transparent stroke-emerald-400" strokeWidth={2} />
+      )}
       <rect
         x={8}
         y={0}
