@@ -55,21 +55,25 @@ class Vehicle(db.Model):
     is_premium: Mapped[bool] = mapped_column(default=False, nullable=False)
     is_collector: Mapped[bool] = mapped_column(default=False, nullable=False)
 
-    # BR i koszty (opcjonalne, bo nie zawsze je od razu mamy)
+    # BR i koszty
     br_ab: Mapped[float | None] = mapped_column(nullable=True)
     br_rb: Mapped[float | None] = mapped_column(nullable=True)
     br_sb: Mapped[float | None] = mapped_column(nullable=True)
 
     rp_cost: Mapped[int | None] = mapped_column(nullable=True)
-    ge_cost: Mapped[int | None] = mapped_column(nullable=True)
+    ge_cost: Mapped[int | None] = mapped_column(nullable=True)     # Golden Eagles (premium)
+    gjn_cost: Mapped[int | None] = mapped_column(nullable=True)    # Gaijin Coin (kolekcjonerskie)
 
     image_url: Mapped[str | None] = mapped_column(nullable=True)
     wiki_url: Mapped[str | None] = mapped_column(nullable=True)
 
-    # relacje (opcjonalne, przydadzą się później)
+    # wariant „w folderze” -> id pojazdu-rodzica
+    folder_of: Mapped[int | None] = mapped_column(ForeignKey("vehicles.id"), nullable=True, index=True)
+
     nation = relationship("Nation")
     vclass = relationship("VehicleClass")
     rank = relationship("Rank")
+    folder_parent = relationship("Vehicle", remote_side=[id], uselist=False)
 
     def __repr__(self) -> str:
         return f"<Vehicle {self.id}:{self.name}>"

@@ -1,166 +1,171 @@
 import json
 from typing import Any, Dict, List, Tuple
 
-from flask import current_app
-from sqlalchemy.exc import IntegrityError
-
 from models import db, Nation, VehicleClass, Rank, Vehicle, VehicleEdge
 
 
-class ImportReport(dict):
-    """Prosty raport z importu."""
-    def __init__(self):
-        super().__init__(nations=0, classes=0, ranks=0, vehicles=0, edges=0, warnings=[], errors=[])
+def _get_or_create(model, **kwargs):
+    inst = model.query.filter_by(**kwargs).first()
+    if inst:
+        return inst, False
+    inst = model(**kwargs)
+    db.session.add(inst)
+    return inst, True
 
 
-def _get_or_create_nation(slug: str, name: str | None = None, flag_url: str | None = None) -> Nation:
-    obj = Nation.query.filter_by(slug=slug).first()
-    if obj:
-        return obj
-    obj = Nation(slug=slug, name=name or slug.upper(), flag_url=flag_url)
-    db.session.add(obj)
-    return obj
-
-
-def _get_or_create_class(name: str) -> VehicleClass:
-    obj = VehicleClass.query.filter_by(name=name).first()
-    if obj:
-        return obj
-    obj = VehicleClass(name=name)
-    db.session.add(obj)
-    return obj
-
-
-def _get_or_create_rank(rid: int, label: str | None = None) -> Rank:
-    obj = Rank.query.get(rid)
-    if obj:
-        return obj
-    obj = Rank(id=rid, label=label or str(rid))
-    db.session.add(obj)
-    return obj
-
-
-def import_from_json_dict(data: Dict[str, Any]) -> ImportReport:
+def _import_from_data(data: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Importuje dane z dict (już zdeserializowanego JSON-a).
-    Oczekiwany kształt:
-    {
-      "nations":[{"slug":"usa","name":"USA"}],
-      "classes":["army","helicopter","aviation","coastal","bluewater"],
-      "ranks":[{"id":1,"label":"I"}, ...]  // albo [1,2,3,...]
-      "vehicles":[
-        {
-          "key":"us_m3_lee",
-          "name":"M3 Lee",
-          "nation":"usa",
-          "class":"army",
-          "rank":2,
-          "type":"tree",  // "tree" | "premium" | "collector"
-          "br_rb":2.7,
-          "rp_cost":12000,
-          "ge_cost": null,
-          "image_url": null,
-          "wiki_url": null,
-          "edges":{"parents":["..."],"children":["..."]}
-        }
-      ]
-    }
+    Import JSON z obsługą:
+    - nations: [{slug,name,flag_url?}]
+    - classes: ["army", ...] lub [{name: "army"}]
+    - ranks: [{id,label}]
+    - vehicles: wpisy z polami:
+        key, name, nation, class, rank, type('tree'|'premium'|'collector'),
+        rp_cost?, ge_cost?, br_ab/br_rb/br_sb lub br:{ab,rb,sb}, image_url?, wiki_url?,
+        folder_of_key?, edges:{parents:[keys...], unlock_rp?}
+    - edges: [{parent_key, child_key, unlock_rp?}]
     """
-    rep = ImportReport()
+    report: Dict[str, Any] = {"nations": 0, "classes": 0, "ranks": 0, "vehicles": 0, "edges": 0, "warnings": []}
 
-    # 1) słowniki
-    for n in data.get("nations", []):
-        _get_or_create_nation(n["slug"], n.get("name"), n.get("flag_url"))
-        rep["nations"] += 1
+    # --- nations ---
+    for nd in data.get("nations", []):
+        if not isinstance(nd, dict):
+            report["warnings"].append(f"Unexpected nation entry: {nd!r}")
+            continue
+        slug = nd["slug"]
+        n, _ = _get_or_create(Nation, slug=slug)
+        n.name = nd.get("name", slug)
+        n.flag_url = nd.get("flag_url")
+        report["nations"] += 1
 
-    for c in data.get("classes", []):
-        _get_or_create_class(c)
-        rep["classes"] += 1
+    # --- classes ---
+    for cn in data.get("classes", []):
+        name = cn["name"] if isinstance(cn, dict) else str(cn)
+        _get_or_create(VehicleClass, name=name)
+        report["classes"] += 1
 
-    ranks = data.get("ranks", [])
-    for r in ranks:
-        if isinstance(r, dict):
-            _get_or_create_rank(int(r["id"]), r.get("label"))
-        else:
-            _get_or_create_rank(int(r), None)
-        rep["ranks"] += 1
-
-    db.session.flush()  # żeby mieć ID słowników
-
-    # 2) pojazdy
-    key_to_dbid: Dict[str, int] = {}
-    vehicles = data.get("vehicles", [])
-    for v in vehicles:
-        key = v["key"]  # wymagamy klucza do łączenia krawędzi
-        nation = _get_or_create_nation(v["nation"])
-        vclass = _get_or_create_class(v["class"])
-        rank = _get_or_create_rank(int(v["rank"]))
-
-        vtype = (v.get("type") or "tree").lower()
-        is_tree = vtype == "tree"
-        is_premium = vtype == "premium"
-        is_collector = vtype == "collector"
-
-        vehicle = Vehicle(
-            name=v["name"],
-            nation_id=nation.id,
-            class_id=vclass.id,
-            rank_id=rank.id,
-            is_tree=is_tree,
-            is_premium=is_premium,
-            is_collector=is_collector,
-            br_ab=v.get("br_ab"),
-            br_rb=v.get("br_rb"),
-            br_sb=v.get("br_sb"),
-            rp_cost=v.get("rp_cost"),
-            ge_cost=v.get("ge_cost"),
-            image_url=v.get("image_url"),
-            wiki_url=v.get("wiki_url"),
-        )
-        db.session.add(vehicle)
-        db.session.flush()  # od razu mamy vehicle.id
-        key_to_dbid[key] = vehicle.id
-        rep["vehicles"] += 1
+    # --- ranks ---
+    for rr in data.get("ranks", []):
+        rid = int(rr["id"])
+        r, _ = _get_or_create(Rank, id=rid)
+        r.label = str(rr.get("label") or rid)
+        report["ranks"] += 1
 
     db.session.flush()
 
-    # 3) krawędzie
-    edges_added = 0
-    for v in vehicles:
-        key = v["key"]
-        vid = key_to_dbid.get(key)
-        edges = v.get("edges") or {}
-        for child_key in edges.get("children", []):
-            cid = key_to_dbid.get(child_key)
-            if cid is None:
-                rep["warnings"].append(f"child '{child_key}' not found for '{key}'")
-                continue
-            db.session.add(VehicleEdge(parent_id=vid, child_id=cid, unlock_rp=v.get("unlock_rp")))
-            edges_added += 1
+    slug_to_id = {n.slug: n.id for n in Nation.query.all()}
+    class_to_id = {c.name: c.id for c in VehicleClass.query.all()}
 
-        for parent_key in edges.get("parents", []):
-            pid = key_to_dbid.get(parent_key)
-            if pid is None:
-                rep["warnings"].append(f"parent '{parent_key}' not found for '{key}'")
-                continue
-            db.session.add(VehicleEdge(parent_id=pid, child_id=vid, unlock_rp=v.get("unlock_rp")))
-            edges_added += 1
+    # maps
+    key_to_id: Dict[str, int] = {}
+    folders: List[Tuple[str, str]] = []  # (variant_key, parent_key)
+    per_vehicle_edges: List[Tuple[str, str, int | None]] = []  # (parent_key, child_key, unlock_rp)
 
-    rep["edges"] = edges_added
+    # --- vehicles ---
+    for vd in data.get("vehicles", []):
+        key = vd.get("key") or vd.get("id") or vd["name"]
 
-    # Finish
-    try:
-        db.session.commit()
-    except IntegrityError as e:
-        db.session.rollback()
-        rep["errors"].append(str(e))
-        current_app.logger.exception("Import failed", exc_info=e)
-        raise
+        n_slug = vd["nation"]
+        c_name = vd["class"]
+        rank_id = int(vd.get("rank", 1))
 
-    return rep
+        if n_slug not in slug_to_id:
+            report["warnings"].append(f"Unknown nation slug '{n_slug}' for vehicle {key}")
+            continue
+        if c_name not in class_to_id:
+            report["warnings"].append(f"Unknown class '{c_name}' for vehicle {key}")
+            continue
+        if not Rank.query.get(rank_id):
+            report["warnings"].append(f"Unknown rank '{rank_id}' for vehicle {key}")
+            continue
+
+        vtype = vd.get("type", "tree")
+        is_tree = (vtype == "tree")
+        is_premium = (vtype == "premium")
+        is_collector = (vtype == "collector")
+        v = Vehicle(
+            name=vd["name"],
+            nation_id=slug_to_id[n_slug],
+            class_id=class_to_id[c_name],
+            rank_id=rank_id,
+            is_tree=is_tree,
+            is_premium=is_premium,
+            is_collector=is_collector,
+            rp_cost=vd.get("rp_cost"),
+            ge_cost=vd.get("ge_cost"),
+            gjn_cost=vd.get("gjn_cost"),  # <-- DODANE
+            br_ab=vd.get("br_ab") or (vd.get("br") or {}).get("ab"),
+            br_rb=vd.get("br_rb") or (vd.get("br") or {}).get("rb"),
+            br_sb=vd.get("br_sb") or (vd.get("br") or {}).get("sb"),
+            image_url=vd.get("image_url"),
+            wiki_url=vd.get("wiki_url"),
+        )
+
+        db.session.add(v)
+        db.session.flush()
+        key_to_id[key] = v.id
+        report["vehicles"] += 1
+
+        # edges osadzone w pojeździe
+        ed = vd.get("edges") or {}
+        parents = ed.get("parents") or []
+        urp = ed.get("unlock_rp")
+        if isinstance(parents, list):
+            for pk in parents:
+                per_vehicle_edges.append((pk, key, urp))
+
+        # folder_of
+        folder_key = vd.get("folder_of_key")
+        if folder_key:
+            folders.append((key, folder_key))
+
+    # --- folder_of po utworzeniu wszystkich ID ---
+    for variant_key, parent_key in folders:
+        v_id = key_to_id.get(variant_key)
+        p_id = key_to_id.get(parent_key)
+        if v_id and p_id:
+            v = Vehicle.query.get(v_id)
+            v.folder_of = p_id
+        else:
+            report["warnings"].append(f"Folder link unresolved: {variant_key} -> {parent_key}")
+
+    # --- edges z pojazdów i globalne ---
+    created_edges = 0
+
+    def _create_edge(pkey: str, ckey: str, urp_val: int | None):
+        nonlocal created_edges
+        p = key_to_id.get(pkey)
+        c = key_to_id.get(ckey)
+        if not p or not c:
+            report["warnings"].append(f"Edge unresolved: {pkey} -> {ckey}")
+            return
+        exists = VehicleEdge.query.filter_by(parent_id=p, child_id=c).first()
+        if exists:
+            return
+        db.session.add(VehicleEdge(parent_id=p, child_id=c, unlock_rp=(int(urp_val) if urp_val else None)))
+        created_edges += 1
+
+    # a) zdefiniowane przy pojazdach
+    for pk, ck, urp in per_vehicle_edges:
+        _create_edge(pk, ck, urp)
+
+    # b) globalne
+    for ed in data.get("edges", []):
+        _create_edge(ed.get("parent_key"), ed.get("child_key"), ed.get("unlock_rp"))
+
+    report["edges"] = created_edges
+
+    db.session.commit()
+    return report
 
 
-def import_from_json_file(path: str) -> ImportReport:
+def import_from_json_dict(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Publiczna wersja przyjmująca już sparsowany słownik JSON."""
+    return _import_from_data(data)
+
+
+def import_from_json_file(path: str) -> Dict[str, Any]:
+    """Publiczna wersja wczytująca JSON z pliku."""
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
-    return import_from_json_dict(data)
+    return _import_from_data(data)

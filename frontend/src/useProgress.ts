@@ -1,39 +1,68 @@
-import { useMemo } from 'react'
+import { useMemo, useSyncExternalStore } from 'react'
 
-/** Struktura wpisu postępu dla jednego pojazdu. */
 type Entry = {
-  rp?: number   // aktualne RP
-  done?: boolean // czy „wybadany”
+  rp?: number
+  done?: boolean
 }
+
+type Mode = 'local' | 'memory'
 
 const STORAGE_KEY = 'gt_progress_v2'
 
-function readAll(): Record<number, Entry> {
+// --- prosta busola do powiadamiania subskrybentów ---
+let version = 0
+const listeners = new Set<() => void>()
+function emit() {
+  version++
+  for (const fn of listeners) fn()
+}
+function subscribe(cb: () => void) {
+  listeners.add(cb)
+  return () => listeners.delete(cb)
+}
+function getSnapshot() {
+  return version
+}
+
+// --- persystencja ---
+let mode: Mode = 'local'
+let mem: Record<number, Entry> = {}
+
+function readLocal(): Record<number, Entry> {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (!raw) return {}
     const obj = JSON.parse(raw)
-    // kompatybilność wsteczna: kiedyś trzymaliśmy samą liczbę
-    if (obj && typeof obj === 'object') {
-      for (const k of Object.keys(obj)) {
-        const v = (obj as any)[k]
-        if (typeof v === 'number') {
-          ;(obj as any)[k] = { rp: v } as Entry
-        }
-      }
-      return obj as Record<number, Entry>
-    }
+    if (obj && typeof obj === 'object') return obj as Record<number, Entry>
     return {}
   } catch {
     return {}
   }
 }
-
-function writeAll(map: Record<number, Entry>) {
+function writeLocal(map: Record<number, Entry>) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(map))
 }
+function readAll(): Record<number, Entry> {
+  return mode === 'local' ? readLocal() : mem
+}
+function writeAll(map: Record<number, Entry>) {
+  if (mode === 'local') writeLocal(map)
+  else mem = map
+}
 
-export function useProgressStore() {
+// publiczne API
+
+export function setProgressPersistence(persist: boolean) {
+  // true => localStorage, false => pamięć ulotna
+  mode = persist ? 'local' : 'memory'
+  if (!persist) mem = {} // czysty stan dla gościa
+  emit()
+}
+
+export function useProgress() {
+  // subskrybuj zmiany; snapshot to „wersja” — każda mutacja ją zwiększa
+  useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
+
   const api = useMemo(() => {
     return {
       getRP(id: number): number {
@@ -44,26 +73,30 @@ export function useProgressStore() {
         const all = readAll()
         return !!all[id]?.done
       },
-      /** Ustaw RP (z klampowaniem 0..total). Gdy rp >= total, ustawia done=true. */
       setRP(id: number, rp: number, total?: number) {
         const all = readAll()
         const curr: Entry = all[id] ?? {}
         const max = typeof total === 'number' && total > 0 ? total : Number.POSITIVE_INFINITY
-        const clamped = Math.max(0, Math.min(Math.floor(rp), max))
+        const clamped = Math.min(Math.max(0, Math.floor(rp)), max)
         curr.rp = clamped
         if (typeof total === 'number' && total > 0) {
           curr.done = clamped >= total
         }
         all[id] = curr
         writeAll(all)
+        emit()
       },
-      setDone(id: number, done: boolean) {
+      setDone(id: number, done: boolean, total?: number) {
         const all = readAll()
         const curr: Entry = all[id] ?? {}
         curr.done = !!done
-        // gdy oznaczamy done, a nie było RP – zapisz RP = total w logice wywołującej (tam mamy total)
+        if (done && typeof total === 'number' && total > 0) {
+          // przy oznaczeniu „done” ustaw RP = total dla spójności
+          curr.rp = total
+        }
         all[id] = curr
         writeAll(all)
+        emit()
       },
       clear(id?: number) {
         if (typeof id === 'number') {
@@ -73,8 +106,10 @@ export function useProgressStore() {
         } else {
           writeAll({})
         }
+        emit()
       }
     }
   }, [])
+
   return api
 }

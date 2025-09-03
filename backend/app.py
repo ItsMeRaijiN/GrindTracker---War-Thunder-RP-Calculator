@@ -1,13 +1,18 @@
 import os
-from typing import Any, Dict
+import secrets
+from typing import Any, Dict, Optional, Tuple, Callable
+from functools import wraps
+from datetime import datetime
 
 import click
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, g
 from flask_cors import CORS
 from flasgger import Swagger
 from sqlalchemy import select
+from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
+from werkzeug.security import generate_password_hash, check_password_hash
 
-from models import db, Nation, VehicleClass, Rank, Vehicle, VehicleEdge
+from models import db, Nation, VehicleClass, Rank, Vehicle, VehicleEdge, User
 from importer import import_from_json_file, import_from_json_dict
 
 
@@ -23,7 +28,7 @@ def create_app() -> Flask:
             db_file = os.path.join(app.instance_path, "grindtracker.db")
             return f"sqlite:///{db_file}"
         if uri.startswith("sqlite:///"):
-            path = uri[len("sqlite:///"):]
+            path = uri[len("sqlite:///") :]
             if not os.path.isabs(path):
                 db_file = os.path.join(app.instance_path, path)
                 return f"sqlite:///{db_file}"
@@ -31,14 +36,70 @@ def create_app() -> Flask:
         return uri
 
     db_uri = resolve_sqlite_uri(env_uri)
-    app.config["SQLALCHEMY_DATABASE_URI"] = db_uri
-    app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-    app.config["SWAGGER"] = {"title": "GrindTracker API", "uiversion": 3}
+
+    # ---- SECRET_KEY (ENV -> plik -> generacja) ----
+    def load_or_create_secret() -> str:
+        env_secret = os.getenv("SECRET_KEY")
+        if env_secret:
+            return env_secret
+        secret_path = os.path.join(app.instance_path, "secret.key")
+        if os.path.exists(secret_path):
+            with open(secret_path, "r", encoding="utf-8") as f:
+                return f.read().strip()
+        secret = secrets.token_urlsafe(32)
+        with open(secret_path, "w", encoding="utf-8") as f:
+            f.write(secret)
+        return secret
+
+    app.config.update(
+        SQLALCHEMY_DATABASE_URI=db_uri,
+        SQLALCHEMY_TRACK_MODIFICATIONS=False,
+        SWAGGER={"title": "GrindTracker API", "uiversion": 3},
+        SECRET_KEY=load_or_create_secret(),
+        AUTH_TOKEN_MAX_AGE=60 * 60 * 24 * 30,  # 30 dni
+    )
 
     CORS(app, resources={r"/api/*": {"origins": "*"}})
     Swagger(app)
-
     db.init_app(app)
+
+    # ---- Auth utils ----
+    signer = URLSafeTimedSerializer(app.config["SECRET_KEY"], salt="gt-auth")
+
+    def make_token(user: User) -> str:
+        payload = {"id": user.id, "email": user.email}
+        return signer.dumps(payload)
+
+    def decode_token(token: str) -> Dict[str, Any]:
+        max_age = int(app.config["AUTH_TOKEN_MAX_AGE"])
+        return signer.loads(token, max_age=max_age)
+
+    def get_bearer_token() -> Optional[str]:
+        auth = request.headers.get("Authorization", "").strip()
+        if not auth.lower().startswith("bearer "):
+            return None
+        return auth.split(" ", 1)[1].strip() or None
+
+    def auth_required(fn: Callable):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            token = get_bearer_token()
+            if not token:
+                return jsonify({"error": "Missing bearer token"}), 401
+            try:
+                data = decode_token(token)
+            except SignatureExpired:
+                return jsonify({"error": "Token expired"}), 401
+            except BadSignature:
+                return jsonify({"error": "Invalid token"}), 401
+
+            user = User.query.get(int(data.get("id", 0)))
+            if not user:
+                return jsonify({"error": "User not found"}), 401
+            g.current_user = user
+            return fn(*args, **kwargs)
+
+        return wrapper
 
     # ---------- HELPERS ----------
     def vehicle_to_dict(v: Vehicle) -> Dict[str, Any]:
@@ -55,21 +116,62 @@ def create_app() -> Flask:
             "ge_cost": v.ge_cost,
             "image_url": v.image_url,
             "wiki_url": v.wiki_url,
+            # kluczowe dla folderów
+            "folder_of": getattr(v, "folder_of", None),
         }
 
     # ---------- ROUTES ----------
     @app.get("/")
     def index():
-        return jsonify({
-            "service": "GrindTracker API",
-            "status": "ok",
-            "docs": "/apidocs",
-            "health": "/api/health"
-        })
+        return jsonify({"service": "GrindTracker API", "status": "ok", "docs": "/apidocs", "health": "/api/health"})
 
     @app.get("/api/health")
     def health():
         return jsonify({"status": "ok"})
+
+    # --- AUTH ---
+    @app.post("/api/auth/register")
+    def auth_register():
+        data = request.get_json(silent=True) or {}
+        email = (data.get("email") or "").strip().lower()
+        password = (data.get("password") or "").strip()
+        if not email or not password:
+            return jsonify({"error": "Email and password are required"}), 400
+        if User.query.filter_by(email=email).first():
+            return jsonify({"error": "Email is already in use"}), 400
+
+        user = User(email=email, password_hash=generate_password_hash(password), created_at=datetime.utcnow())
+        db.session.add(user)
+        db.session.commit()
+
+        token = make_token(user)
+        return jsonify({"token": token, "user": {"id": user.id, "email": user.email}})
+
+    @app.post("/api/auth/login")
+    def auth_login():
+        data = request.get_json(silent=True) or {}
+        email = (data.get("email") or "").strip().lower()
+        password = (data.get("password") or "").strip()
+        if not email or not password:
+            return jsonify({"error": "Email and password are required"}), 400
+
+        user = User.query.filter_by(email=email).first()
+        if not user or not check_password_hash(user.password_hash, password):
+            return jsonify({"error": "Invalid credentials"}), 401
+
+        token = make_token(user)
+        return jsonify({"token": token, "user": {"id": user.id, "email": user.email}})
+
+    @app.post("/api/auth/logout")
+    def auth_logout():
+        # Token jest stateless; klient usuwa go po swojej stronie.
+        return jsonify({"ok": True})
+
+    @app.get("/api/auth/me")
+    @auth_required
+    def auth_me():
+        u: User = g.current_user  # type: ignore
+        return jsonify({"user": {"id": u.id, "email": u.email}})
 
     # --- słowniki ---
     @app.get("/api/nations")
@@ -178,14 +280,19 @@ def create_app() -> Flask:
 
         edges_stmt = select(VehicleEdge).where(
             VehicleEdge.parent_id.in_(node_ids),
-            VehicleEdge.child_id.in_(node_ids)
+            VehicleEdge.child_id.in_(node_ids),
         )
         edges = db.session.execute(edges_stmt).scalars().all()
 
-        return jsonify({
-            "nodes": [vehicle_to_dict(v) for v in nodes],
-            "edges": [{"parent": e.parent_id, "child": e.child_id, "unlock_rp": e.unlock_rp} for e in edges]
-        })
+        return jsonify(
+            {
+                "nodes": [vehicle_to_dict(v) for v in nodes],
+                "edges": [
+                    {"parent": e.parent_id, "child": e.child_id, "unlock_rp": e.unlock_rp}
+                    for e in edges
+                ],
+            }
+        )
 
     # --- Importer JSON (HTTP) ---
     @app.post("/api/import")
@@ -219,7 +326,7 @@ def create_app() -> Flask:
     @app.cli.command("import-json")
     @click.argument("path", required=False)
     @click.option("--path", "-p", "path_opt", help="Path to JSON file")
-    def import_json_command(path: str | None, path_opt: str | None):
+    def import_json_command(path: Optional[str], path_opt: Optional[str]):
         """
         Import data from JSON file.
 
@@ -229,30 +336,25 @@ def create_app() -> Flask:
             flask import-json -p backend/sample_data/us_tiny.json
             flask import-json "C:\\pełna\\ścieżka\\us_tiny.json"
         """
-        # 1) finalna wartość przekazana przez użytkownika
         user_path = (path_opt or path or "").strip()
         if not user_path:
             user_path = click.prompt("Path to JSON", type=str)
 
-        # 2) kandydaci do sprawdzenia
         candidates = []
-
-        # a) jak podał (względem bieżącego katalogu)
         candidates.append(os.path.abspath(os.path.normpath(os.path.expanduser(user_path))))
-
-        # b) względem katalogu aplikacji (backend/)
         candidates.append(os.path.abspath(os.path.join(app.root_path, user_path)))
 
-        # c) jeśli podał z prefiksem "backend/" będąc w backend/, spróbuj bez tego prefiksu
         backend_prefix = "backend" + os.sep
         if user_path.startswith(backend_prefix):
-            trimmed = user_path[len(backend_prefix):]
+            trimmed = user_path[len(backend_prefix) :]
             candidates.append(os.path.abspath(os.path.join(app.root_path, trimmed)))
 
-        # 3) wybierz istniejący
         final_path = next((p for p in candidates if os.path.exists(p)), None)
         if not final_path:
-            raise click.FileError(user_path, hint="File not found. Try a path relative to 'backend/', e.g., sample_data/us_tiny.json")
+            raise click.FileError(
+                user_path,
+                hint="File not found. Try a path relative to 'backend/', e.g., sample_data/us_tiny.json",
+            )
 
         rep = import_from_json_file(final_path)
         print("Import done:", rep)
