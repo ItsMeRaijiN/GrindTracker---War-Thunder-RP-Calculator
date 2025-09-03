@@ -55,11 +55,10 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
-          cache: npm   # ← bez cache-dependency-path, żeby nie failowało gdy brak lockfile
+          node-version: 20   # bez cache — nie mamy lockfile’a
 
       - name: Install
-        run: npm ci --no-audit --no-fund
+        run: npm install --no-audit --no-fund
 
       - name: Build
         run: npm run build

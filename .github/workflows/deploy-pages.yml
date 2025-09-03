@@ -22,18 +22,17 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
-          cache: npm   # ← bez cache-dependency-path
+          node-version: 20   # bez cache — brak lockfile’a
 
       - name: Build
         working-directory: frontend
         env:
           # Ustaw w repo → Settings → Variables → Actions → API_BASE_URL
           VITE_API_BASE_URL: ${{ vars.API_BASE_URL }}
-          # Dla vite.config.ts – ustawia proper base '/<repo>/'
+          # Wymusza prawidłowe base dla GitHub Pages w vite.config.ts
           GITHUB_PAGES: 'true'
         run: |
-          npm ci --no-audit --no-fund
+          npm install --no-audit --no-fund
           npm run build
 
       - name: Upload artifact for Pages
