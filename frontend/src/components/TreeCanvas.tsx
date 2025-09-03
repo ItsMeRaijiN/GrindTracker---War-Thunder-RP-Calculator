@@ -14,7 +14,7 @@ type Pos = { x: number; y: number }
 const NODE_W = 170
 const NODE_H = 84
 const GAP_X = 120
-const GAP_Y = 52
+const GAP_Y = 52 // <- naprawione
 
 // powiększony panel wariantów – miejsce na paski postępu i napisy
 const VAR_W = 320
@@ -108,7 +108,8 @@ export default function TreeCanvas({ data, highlights = [], filterToHighlights =
   const [scale, setScale] = useState(1)
   const [tx, setTx] = useState(40)
   const [ty, setTy] = useState(40)
-  const dragging = useRef<null | { x: number; y: number }>()
+  const dragging = useRef<{ x: number; y: number } | null>(null) // <- czytelniejszy typ
+
   const onWheel: React.WheelEventHandler<SVGSVGElement> = (e) => {
     e.preventDefault()
     const d = -e.deltaY
@@ -267,14 +268,14 @@ export default function TreeCanvas({ data, highlights = [], filterToHighlights =
             }
 
             const highlighted = highlightSet.has(v.id)
-            const dim = filterToHighlights && !highlighted && !(vars.some(x => highlightSet.has(x.id)))
+            const dim = filterToHighlights && !highlighted && !(vars.some((x) => highlightSet.has(x.id)))
 
             return (
               <g key={v.id} transform={`translate(${pos.x}, ${pos.y})`} className={dim ? 'opacity-30' : ''}>
                 <g className={locked ? 'cursor-not-allowed opacity-80' : 'cursor-pointer'} onClick={onClickTile}>
                   {/* highlight aura */}
                   {highlighted && (
-                    <rect width={NODE_W+6} height={NODE_H+6} x={-3} y={-3} rx={14} className="fill-transparent stroke-emerald-400" strokeWidth={2} />
+                    <rect width={NODE_W + 6} height={NODE_H + 6} x={-3} y={-3} rx={14} className="fill-transparent stroke-emerald-400" strokeWidth={2} />
                   )}
                   <rect width={NODE_W} height={NODE_H} rx={12} className={rectCls} strokeWidth={1} />
                   <text x={NODE_W / 2} y={22} textAnchor="middle" className="fill-white text-[12px]">

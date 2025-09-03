@@ -12,7 +12,7 @@ export type Vehicle = {
   br?: { ab?: number | null; rb?: number | null; sb?: number | null }
   rp_cost?: number | null
   ge_cost?: number | null
-    gjn_cost?: number | null
+  gjn_cost?: number | null
   image_url?: string | null
   wiki_url?: string | null
   folder_of?: number | null
@@ -29,7 +29,12 @@ export type VehiclesFilter = {
   nation?: string
   class?: string
   rank?: number
+  rank_min?: number
+  rank_max?: number
+  br_min?: number
+  br_max?: number
   type?: 'tree' | 'premium' | 'collector'
+  exclude_variants?: boolean
   q?: string
 }
 

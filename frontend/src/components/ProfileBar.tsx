@@ -2,9 +2,7 @@ import React, { useEffect, useState } from 'react'
 import type { UserProfile } from '@/types'
 import { api } from '@/api'
 
-type Props = {
-  logged: boolean
-}
+type Props = { logged: boolean }
 
 const LOCAL_KEY = 'gt_profile_guest'
 
@@ -20,14 +18,18 @@ export default function ProfileBar({ logged }: Props) {
 
   // load
   useEffect(() => {
+    let cancelled = false
     if (logged) {
-      api.getProfile().then(setP).catch(() => {})
+      api.getProfile().then((res) => {
+        if (!cancelled) setP(res)
+      }).catch(() => {})
     } else {
-      const raw = localStorage.getItem(LOCAL_KEY)
-      if (raw) {
-        try { setP({ has_premium: false, ...JSON.parse(raw) }) } catch {}
-      }
+      try {
+        const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(LOCAL_KEY) : null
+        if (raw) setP({ has_premium: false, ...JSON.parse(raw) })
+      } catch {}
     }
+    return () => { cancelled = true }
   }, [logged])
 
   // save debounced
@@ -37,7 +39,11 @@ export default function ProfileBar({ logged }: Props) {
         setSaving(true)
         api.saveProfile(p).finally(() => setSaving(false))
       } else {
-        localStorage.setItem(LOCAL_KEY, JSON.stringify(p))
+        try {
+          if (typeof localStorage !== 'undefined') {
+            localStorage.setItem(LOCAL_KEY, JSON.stringify(p))
+          }
+        } catch {}
       }
     }, 400)
     return () => clearTimeout(t)
@@ -51,12 +57,18 @@ export default function ProfileBar({ logged }: Props) {
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
-        <Num label="RP/bitwę" value={p.avg_rp_per_battle} onChange={v => setP(o => ({ ...o, avg_rp_per_battle: v }))} />
-        <Num label="min/bitwę" value={p.avg_battle_minutes} onChange={v => setP(o => ({ ...o, avg_battle_minutes: v }))} />
-        <Num label="Booster %" value={p.booster_percent} onChange={v => setP(o => ({ ...o, booster_percent: v }))} />
-        <Num label="Skill %" value={p.skill_bonus_percent} onChange={v => setP(o => ({ ...o, skill_bonus_percent: v }))} />
+        <Num label="RP/bitwę" value={p.avg_rp_per_battle} onChange={(v) => setP((o) => ({ ...o, avg_rp_per_battle: v }))} />
+        <Num label="min/bitwę" value={p.avg_battle_minutes} onChange={(v) => setP((o) => ({ ...o, avg_battle_minutes: v }))} />
+        <Num label="Booster %" value={p.booster_percent} onChange={(v) => setP((o) => ({ ...o, booster_percent: v }))} />
+        <Num label="Skill %" value={p.skill_bonus_percent} onChange={(v) => setP((o) => ({ ...o, skill_bonus_percent: v }))} />
         <div className="flex items-center gap-2">
-          <input id="prem" type="checkbox" checked={p.has_premium} onChange={e => setP(o => ({ ...o, has_premium: e.target.checked }))} />
+          <input
+            id="prem"
+            type="checkbox"
+            checked={p.has_premium}
+            onChange={(e) => setP((o) => ({ ...o, has_premium: e.target.checked }))}
+            className="accent-emerald-400"
+          />
           <label htmlFor="prem" className="text-sm">Konto premium</label>
         </div>
       </div>
@@ -68,27 +80,38 @@ export default function ProfileBar({ logged }: Props) {
   )
 }
 
-function Num({ label, value, onChange }: { label: string; value: number | null | undefined; onChange: (v: number | null) => void }) {
+function Num({
+  label,
+  value,
+  onChange,
+}: {
+  label: string
+  value: number | null | undefined
+  onChange: (v: number | null) => void
+}) {
   return (
     <label className="text-xs flex flex-col gap-1">
       <span className="opacity-70">{label}</span>
       <input
+        type="number"
         inputMode="numeric"
+        step="any"
         className="rounded bg-neutral-900 border border-white/15 px-2 py-1 text-sm"
         value={value ?? ''}
-        onChange={e => {
+        onChange={(e) => {
           const t = e.target.value.trim()
           onChange(t === '' ? null : Number(t))
         }}
         placeholder="—"
+        aria-label={label}
       />
     </label>
   )
 }
 
 export function multiplier(p: UserProfile): number {
-  const booster = p.booster_percent ? 1 + (p.booster_percent / 100) : 1
-  const skill = p.skill_bonus_percent ? 1 + (p.skill_bonus_percent / 100) : 1
+  const booster = p.booster_percent ? 1 + p.booster_percent / 100 : 1
+  const skill = p.skill_bonus_percent ? 1 + p.skill_bonus_percent / 100 : 1
   const prem = p.has_premium ? 2 : 1
   return booster * skill * prem
 }

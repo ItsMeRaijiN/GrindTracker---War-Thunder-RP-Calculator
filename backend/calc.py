@@ -4,14 +4,11 @@ import math
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
-from sqlalchemy import select, asc
-from sqlalchemy.orm import Session
+from sqlalchemy import asc
 
-from models import db, Vehicle, VehicleEdge, Rank
+from models import Vehicle, VehicleEdge
 
-
-# Uwaga: stała dla premium. W War Thunder premium zwykle daje +100% RP.
-# Jeśli chcesz inną wartość – zmień tu na 1.5, 1.65 itd.
+# Współczynnik konta premium (domyślnie +100% RP)
 PREMIUM_RP_MULT = 2.0
 
 
@@ -59,8 +56,58 @@ def effective_rp_per_battle(p: ProfileParams) -> float:
     return max(0.0, float(p.avg_rp_per_battle) * mult)
 
 
+# ---------- Recent battles (5 ostatnich) ----------
+def _normalize_base_rp(rp: float, premium: bool, booster_percent: Optional[int]) -> float:
+    """Zdejmuje bonusy (premka, booster) z wyniku RP."""
+    denom = 1.0
+    if premium:
+        denom *= PREMIUM_RP_MULT
+    if booster_percent is not None:
+        denom *= (1.0 + (booster_percent / 100.0))
+    if denom <= 0:
+        return float(rp)
+    return float(rp) / denom
+
+def summarize_recent_battles(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Zwraca bazową średnią RP/bitwę (po zdjęciu bonusów) oraz średni czas.
+    rows: [{rp, minutes, premium, booster_percent}]
+    """
+    safe = []
+    for r in rows or []:
+        try:
+            rp = float(r.get("rp") or 0)
+            minutes = float(r.get("minutes") or 0)
+            premium = bool(r.get("premium") or False)
+            booster = r.get("booster_percent")
+            booster = int(booster) if booster not in (None, "") else None
+            safe.append((rp, minutes, premium, booster))
+        except Exception:
+            continue
+
+    if not safe:
+        return {"samples": 0, "avg_rp_per_battle": 0, "avg_battle_minutes": 0}
+
+    base_sum = 0.0
+    min_vals: List[float] = []
+    for rp, minutes, premium, booster in safe:
+        base_sum += _normalize_base_rp(rp, premium, booster)
+        if minutes > 0:
+            min_vals.append(minutes)
+
+    samples = len(safe)
+    avg_rp = base_sum / samples if samples else 0.0
+    avg_min = (sum(min_vals) / len(min_vals)) if min_vals else 0.0
+
+    return {
+        "samples": samples,
+        "avg_rp_per_battle": int(round(avg_rp)),
+        "avg_battle_minutes": int(round(avg_min)),
+    }
+
+
+# ---------- Warianty w folderach / wymagania ----------
 def list_variants_for_parent(parent_id: int) -> List[Vehicle]:
-    """Wszystkie warianty folderowe dla danego rodzica, uporządkowane stabilnie."""
     return (
         Vehicle.query
         .filter(Vehicle.folder_of == parent_id)
@@ -68,9 +115,7 @@ def list_variants_for_parent(parent_id: int) -> List[Vehicle]:
         .all()
     )
 
-
 def prev_variant_id_if_any(v: Vehicle) -> Optional[int]:
-    """Zwraca ID poprzedniego wariantu w folderze (jeśli istnieje)."""
     if not getattr(v, "folder_of", None):
         return None
     siblings = list_variants_for_parent(v.folder_of)
@@ -81,25 +126,16 @@ def prev_variant_id_if_any(v: Vehicle) -> Optional[int]:
         prev = s
     return prev.id if prev else None
 
-
 def prerequisites_for(vehicle_id: int) -> List[int]:
-    """
-    Zwraca listę ID wymaganych poprzedników do odblokowania:
-    - wszyscy rodzice po krawędziach
-    - rodzic folderu (jeśli to wariant)
-    - poprzedni wariant z folderu (jeśli istnieje)
-    """
     v = Vehicle.query.get(vehicle_id)
     if not v:
         return []
 
     req_ids: set[int] = set()
 
-    # Krawędzie grafu
     for e in VehicleEdge.query.filter_by(child_id=vehicle_id).all():
         req_ids.add(e.parent_id)
 
-    # Folder: rodzic i ewentualnie poprzedni wariant
     if getattr(v, "folder_of", None):
         req_ids.add(v.folder_of)
         pv = prev_variant_id_if_any(v)
@@ -109,6 +145,7 @@ def prerequisites_for(vehicle_id: int) -> List[int]:
     return list(req_ids)
 
 
+# ---------- Estymacje ----------
 def estimate_to_unlock(vehicle_id: int, current_rp: int, profile: ProfileParams) -> Dict[str, Any]:
     """
     Szacuje liczbę bitew i czas potrzebny do odblokowania pojazdu.
@@ -127,7 +164,7 @@ def estimate_to_unlock(vehicle_id: int, current_rp: int, profile: ProfileParams)
     if remaining == 0:
         battles = 0
     elif effective <= 0.0:
-        battles = None  # niepoliczalne bez avg_rp_per_battle
+        battles = None
     else:
         battles = math.ceil(remaining / effective)
 
@@ -139,7 +176,7 @@ def estimate_to_unlock(vehicle_id: int, current_rp: int, profile: ProfileParams)
             "id": v.id,
             "name": v.name,
             "rank": v.rank_id,
-            "type": "premium" if v.is_premium else ("collector" if v.is_collector else "tree"),
+            "type": v.type_str,
             "rp_cost": v.rp_cost,
         },
         "rp_current": int(current_rp or 0),
@@ -150,3 +187,33 @@ def estimate_to_unlock(vehicle_id: int, current_rp: int, profile: ProfileParams)
         "hours_needed": hours,
         "prerequisite_ids": prerequisites_for(vehicle_id),
     }
+
+def estimate(
+    vehicle_id: int,
+    current_rp: int,
+    *,
+    profile: ProfileParams,
+    recent_battles: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """
+    Wersja przyjmująca albo średnie z profilu, albo recent_battles (z których liczymy bazę),
+    a następnie nakładamy prognozę (premium/booster/skill).
+    """
+    base_from_recent: Optional[Dict[str, Any]] = None
+
+    if recent_battles:
+        base_from_recent = summarize_recent_battles(recent_battles)
+        # jeśli mamy próbki – używamy ich jako bazowego avg
+        if base_from_recent.get("samples", 0) > 0:
+            profile = ProfileParams(
+                avg_rp_per_battle=int(base_from_recent["avg_rp_per_battle"]),
+                avg_battle_minutes=int(base_from_recent["avg_battle_minutes"]),
+                has_premium=profile.has_premium,
+                booster_percent=profile.booster_percent,
+                skill_bonus_percent=profile.skill_bonus_percent,
+            )
+
+    result = estimate_to_unlock(vehicle_id, current_rp, profile)
+    if base_from_recent:
+        result["base_from_recent"] = base_from_recent
+    return result

@@ -13,9 +13,11 @@
     "skipLibCheck": true,
     "baseUrl": ".",
     "paths": {
-      "@/*": ["src/*"]
+      "@/*": ["src/*"],
+      "rollup/parseAst": ["node_modules/rollup/dist/parseAst.d.ts"]
     },
-    "types": ["node"]
+    "types": ["vite/client", "node"]
   },
-  "include": ["src", "vite-env.d.ts"]
+  "include": ["src", "vite-env.d.ts"],
+  "references": [{ "path": "./tsconfig.node.json" }]
 }

@@ -1,18 +1,19 @@
-from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import UniqueConstraint, ForeignKey
-from sqlalchemy.orm import Mapped, mapped_column, relationship
 from datetime import datetime
+
+from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import ForeignKey, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
 db = SQLAlchemy()
 
 
-# Słowniki
+# ── Słowniki ────────────────────────────────────────────────────────────────────
 class Nation(db.Model):
     __tablename__ = "nations"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    slug: Mapped[str] = mapped_column(unique=True, nullable=False)  # np. "usa", "germany"
-    name: Mapped[str] = mapped_column(nullable=False)               # np. "USA"
+    slug: Mapped[str] = mapped_column(unique=True, nullable=False)   # np. "usa", "germany"
+    name: Mapped[str] = mapped_column(nullable=False)                 # np. "USA"
     flag_url: Mapped[str | None] = mapped_column(nullable=True)
 
     def __repr__(self) -> str:
@@ -23,7 +24,7 @@ class VehicleClass(db.Model):
     __tablename__ = "vehicle_classes"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    name: Mapped[str] = mapped_column(unique=True, nullable=False)  # army|helicopter|aviation|coastal|bluewater
+    name: Mapped[str] = mapped_column(unique=True, nullable=False)   # army|helicopter|aviation|coastal|bluewater
 
     def __repr__(self) -> str:
         return f"<VehicleClass {self.name}>"
@@ -39,7 +40,7 @@ class Rank(db.Model):
         return f"<Rank {self.id}:{self.label}>"
 
 
-# Pojazd
+# ── Pojazd ──────────────────────────────────────────────────────────────────────
 class Vehicle(db.Model):
     __tablename__ = "vehicles"
 
@@ -50,7 +51,7 @@ class Vehicle(db.Model):
     class_id: Mapped[int] = mapped_column(ForeignKey("vehicle_classes.id"), nullable=False, index=True)
     rank_id: Mapped[int] = mapped_column(ForeignKey("ranks.id"), nullable=False, index=True)
 
-    # typy: drzewkowy/premium/kolekcjonerski
+    # typy: drzewkowy/premium/kolekcjonerski (dokładnie jeden)
     is_tree: Mapped[bool] = mapped_column(default=True, nullable=False)
     is_premium: Mapped[bool] = mapped_column(default=False, nullable=False)
     is_collector: Mapped[bool] = mapped_column(default=False, nullable=False)
@@ -61,8 +62,8 @@ class Vehicle(db.Model):
     br_sb: Mapped[float | None] = mapped_column(nullable=True)
 
     rp_cost: Mapped[int | None] = mapped_column(nullable=True)
-    ge_cost: Mapped[int | None] = mapped_column(nullable=True)     # Golden Eagles (premium)
-    gjn_cost: Mapped[int | None] = mapped_column(nullable=True)    # Gaijin Coin (kolekcjonerskie)
+    ge_cost: Mapped[int | None] = mapped_column(nullable=True)       # Golden Eagles (premium)
+    gjn_cost: Mapped[int | None] = mapped_column(nullable=True)      # Gaijin Coin (kolekcjonerskie)
 
     image_url: Mapped[str | None] = mapped_column(nullable=True)
     wiki_url: Mapped[str | None] = mapped_column(nullable=True)
@@ -75,11 +76,34 @@ class Vehicle(db.Model):
     rank = relationship("Rank")
     folder_parent = relationship("Vehicle", remote_side=[id], uselist=False)
 
+    # Wygodny string typu pojazdu do API/serializacji
+    @property
+    def type_str(self) -> str:
+        if self.is_premium:
+            return "premium"
+        if self.is_collector:
+            return "collector"
+        return "tree"
+
+    # „Miękka” normalizacja: jeśli któryś z typów ustawiony na True,
+    # wyłącz pozostałe – utrzymujemy wyłączność flag.
+    @validates("is_tree", "is_premium", "is_collector")
+    def _validate_type_flags(self, key: str, value: bool) -> bool:
+        v = bool(value)
+        if v:
+            if key != "is_tree" and getattr(self, "is_tree", False):
+                self.is_tree = False
+            if key != "is_premium" and getattr(self, "is_premium", False):
+                self.is_premium = False
+            if key != "is_collector" and getattr(self, "is_collector", False):
+                self.is_collector = False
+        return v
+
     def __repr__(self) -> str:
-        return f"<Vehicle {self.id}:{self.name}>"
+        return f"<Vehicle {self.id}:{self.name} ({self.type_str})>"
 
 
-# Relacje drzewka: poprzednik -> następca
+# ── Relacje drzewka: poprzednik -> następca ─────────────────────────────────────
 class VehicleEdge(db.Model):
     __tablename__ = "vehicle_edges"
     __table_args__ = (UniqueConstraint("parent_id", "child_id", name="uq_edge_parent_child"),)
@@ -88,7 +112,7 @@ class VehicleEdge(db.Model):
     parent_id: Mapped[int] = mapped_column(ForeignKey("vehicles.id"), nullable=False, index=True)
     child_id: Mapped[int] = mapped_column(ForeignKey("vehicles.id"), nullable=False, index=True)
 
-    # jeżeli koszt RP odblokowania różni się od rp_cost dziecka (opcjonalnie)
+    # jeśli koszt RP odblokowania różni się od rp_cost dziecka (opcjonalnie)
     unlock_rp: Mapped[int | None] = mapped_column(nullable=True)
 
     parent = relationship("Vehicle", foreign_keys=[parent_id])
@@ -98,7 +122,7 @@ class VehicleEdge(db.Model):
         return f"<Edge {self.parent_id}->{self.child_id}>"
 
 
-# Użytkownik i progres
+# ── Użytkownik i progres ────────────────────────────────────────────────────────
 class User(db.Model):
     __tablename__ = "users"
 
@@ -120,8 +144,8 @@ class UserProfile(db.Model):
     avg_rp_per_battle: Mapped[int | None] = mapped_column(nullable=True)
     avg_battle_minutes: Mapped[int | None] = mapped_column(nullable=True)
     has_premium: Mapped[bool] = mapped_column(default=False, nullable=False)
-    booster_percent: Mapped[int | None] = mapped_column(nullable=True)      # np. 50 = +50%
-    skill_bonus_percent: Mapped[int | None] = mapped_column(nullable=True)  # ewentualny mnożnik własny
+    booster_percent: Mapped[int | None] = mapped_column(nullable=True)       # np. 50 = +50%
+    skill_bonus_percent: Mapped[int | None] = mapped_column(nullable=True)   # np. 10 = +10%
 
     user = relationship("User", back_populates="profile")
 

@@ -43,7 +43,7 @@ const memStores: Record<string, Record<number, Entry>> = {}
 
 function readLocal(): Record<number, Entry> {
   try {
-    const raw = localStorage.getItem(storageKey())
+    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(storageKey()) : null
     if (!raw) return {}
     const obj = JSON.parse(raw)
     return obj && typeof obj === 'object' ? (obj as Record<number, Entry>) : {}
@@ -53,7 +53,9 @@ function readLocal(): Record<number, Entry> {
 }
 function writeLocal(map: Record<number, Entry>) {
   try {
-    localStorage.setItem(storageKey(), JSON.stringify(map))
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(storageKey(), JSON.stringify(map))
+    }
   } catch {
     // ignore (np. quota exceeded / SSR)
   }
@@ -151,7 +153,7 @@ export function useProgress() {
           writeAll({ ...map })
         }
         emit()
-      },
+      }
     }
   }, [])
 

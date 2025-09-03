@@ -13,7 +13,16 @@ from sqlalchemy import select, func, asc
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from werkzeug.security import generate_password_hash, check_password_hash
 
-from models import db, Nation, VehicleClass, Rank, Vehicle, VehicleEdge, User
+from models import (
+    db,
+    Nation,
+    VehicleClass,
+    Rank,
+    Vehicle,
+    VehicleEdge,
+    User,
+    UserProfile,  # <— dodane
+)
 from importer import import_from_json_file, import_from_json_dict
 
 
@@ -111,10 +120,11 @@ def create_app() -> Flask:
             "class": v.vclass.name if v.vclass else None,
             "rank": v.rank.id if v.rank else None,
             "rank_label": v.rank.label if v.rank else None,
-            "type": "premium" if v.is_premium else ("collector" if v.is_collector else "tree"),
+            "type": v.type_str,  # z modeli (tree|premium|collector)
             "br": {"ab": v.br_ab, "rb": v.br_rb, "sb": v.br_sb},
             "rp_cost": v.rp_cost,
             "ge_cost": v.ge_cost,
+            "gjn_cost": v.gjn_cost,  # <— DODANE, potrzebne na półce kolekcjonerskich
             "image_url": v.image_url,
             "wiki_url": v.wiki_url,
             "folder_of": getattr(v, "folder_of", None),
@@ -128,8 +138,7 @@ def create_app() -> Flask:
 
     def list_variants_for_parent(parent_id: int) -> List[Vehicle]:
         return (
-            Vehicle.query
-            .filter(Vehicle.folder_of == parent_id)
+            Vehicle.query.filter(Vehicle.folder_of == parent_id)
             .order_by(asc(Vehicle.rank_id), _coalesced_br().asc(), asc(Vehicle.name))
             .all()
         )
@@ -186,9 +195,9 @@ def create_app() -> Flask:
         if has_premium:
             mult *= PREMIUM_RP_MULT
         if booster_percent:
-            mult *= (1.0 + booster_percent / 100.0)
+            mult *= 1.0 + booster_percent / 100.0
         if skill_bonus_percent:
-            mult *= (1.0 + skill_bonus_percent / 100.0)
+            mult *= 1.0 + skill_bonus_percent / 100.0
         return max(0.0, float(avg_rp_per_battle) * mult)
 
     def averages_from_recent(data: Dict[str, Any]) -> Tuple[float, float, int]:
@@ -216,12 +225,12 @@ def create_app() -> Flask:
                 denom *= PREMIUM_RP_MULT
             if bperc is not None:
                 try:
-                    denom *= (1.0 + float(bperc) / 100.0)
+                    denom *= 1.0 + float(bperc) / 100.0
                 except Exception:
                     pass
             if sperc is not None:
                 try:
-                    denom *= (1.0 + float(sperc) / 100.0)
+                    denom *= 1.0 + float(sperc) / 100.0
                 except Exception:
                     pass
             if rp_val > 0:
@@ -301,9 +310,89 @@ def create_app() -> Flask:
         rows = Rank.query.order_by(Rank.id).all()
         return jsonify([{"id": r.id, "label": r.label} for r in rows])
 
+    # --- profil użytkownika (do ProfileBar) ---
+    @app.get("/api/profile")
+    @auth_required
+    def get_profile():
+        u: User = g.current_user  # type: ignore
+        p = UserProfile.query.filter_by(user_id=u.id).first()
+        if not p:
+            # zwracamy domyślne wartości
+            return jsonify(
+                {
+                    "user_id": u.id,
+                    "avg_rp_per_battle": None,
+                    "avg_battle_minutes": None,
+                    "has_premium": False,
+                    "booster_percent": None,
+                    "skill_bonus_percent": None,
+                }
+            )
+        return jsonify(
+            {
+                "user_id": p.user_id,
+                "avg_rp_per_battle": p.avg_rp_per_battle,
+                "avg_battle_minutes": p.avg_battle_minutes,
+                "has_premium": bool(p.has_premium),
+                "booster_percent": p.booster_percent,
+                "skill_bonus_percent": p.skill_bonus_percent,
+            }
+        )
+
+    @app.put("/api/profile")
+    @auth_required
+    def save_profile():
+        u: User = g.current_user  # type: ignore
+        data = request.get_json(silent=True) or {}
+        p = UserProfile.query.filter_by(user_id=u.id).first()
+        if not p:
+            p = UserProfile(user_id=u.id)
+
+        def _to_int_or_none(v):
+            return int(v) if (v is not None and str(v).strip() != "") else None
+
+        p.avg_rp_per_battle = _to_int_or_none(data.get("avg_rp_per_battle"))
+        p.avg_battle_minutes = _to_int_or_none(data.get("avg_battle_minutes"))
+        p.has_premium = bool(data.get("has_premium") or False)
+        p.booster_percent = _to_int_or_none(data.get("booster_percent"))
+        p.skill_bonus_percent = _to_int_or_none(data.get("skill_bonus_percent"))
+
+        db.session.add(p)
+        db.session.commit()
+        return jsonify({"ok": True})
+
     # --- listowanie pojazdów ---
     @app.get("/api/vehicles")
     def list_vehicles():
+        """
+        List vehicles with filters
+        ---
+        tags: [catalog]
+        parameters:
+          - in: query
+            name: nation
+            type: string
+          - in: query
+            name: class
+            type: string
+          - in: query
+            name: rank
+            type: integer
+          - in: query
+            name: type
+            type: string
+            enum: [tree, premium, collector]
+          - in: query
+            name: q
+            type: string
+          - in: query
+            name: exclude_variants
+            type: integer
+            enum: [0, 1]
+        responses:
+          200:
+            description: OK
+        """
         qn = request.args.get("nation")
         qc = request.args.get("class")
         qr = request.args.get("rank", type=int)
@@ -353,7 +442,8 @@ def create_app() -> Flask:
             like = f"%{qsearch}%"
             stmt = stmt.where(Vehicle.name.ilike(like))
 
-        stmt = stmt.order_by(Rank.id, Vehicle.id)
+        # porządek: era -> BR (zastępczo) -> nazwa
+        stmt = stmt.order_by(Rank.id, br_coalesce.asc(), Vehicle.name.asc(), Vehicle.id.asc())
         rows = db.session.execute(stmt).scalars().all()
         return jsonify([vehicle_to_dict(v) for v in rows])
 
@@ -390,6 +480,44 @@ def create_app() -> Flask:
     # --- kalkulator (pojedynczy) ---
     @app.post("/api/calc/estimate")
     def calc_estimate():
+        """
+        Estimate RP/time to unlock a single vehicle
+        ---
+        tags:
+          - calc
+        consumes:
+          - application/json
+        parameters:
+          - in: body
+            name: payload
+            required: true
+            schema:
+              type: object
+              properties:
+                vehicle_id: {type: integer, example: 1}
+                rp_current: {type: integer, example: 0}
+                avg_rp_per_battle: {type: number, example: 400}
+                avg_battle_minutes: {type: number, example: 9}
+                has_premium: {type: boolean, example: false}
+                booster_percent: {type: integer, example: 50}
+                skill_bonus_percent: {type: integer, example: 10}
+                recent_battles:
+                  type: array
+                  maxItems: 5
+                  items:
+                    type: object
+                    properties:
+                      rp: {type: number, example: 1200}
+                      minutes: {type: number, example: 10}
+                      premium: {type: boolean, example: true}
+                      booster_percent: {type: integer, example: 50}
+                      skill_bonus_percent: {type: integer, example: 10}
+        responses:
+          200:
+            description: OK
+          400:
+            description: Validation error
+        """
         data = request.get_json(silent=True) or {}
         vehicle_id = int(data.get("vehicle_id") or 0)
         if not vehicle_id:
@@ -448,7 +576,7 @@ def create_app() -> Flask:
                 "id": v.id,
                 "name": v.name,
                 "rank": v.rank_id,
-                "type": "premium" if v.is_premium else ("collector" if v.is_collector else "tree"),
+                "type": v.type_str,
                 "rp_cost": v.rp_cost,
                 "ge_cost": v.ge_cost,
             },
@@ -472,17 +600,48 @@ def create_app() -> Flask:
     @app.post("/api/calc/cascade")
     def calc_cascade():
         """
-        Body JSON:
-        {
-          vehicle_id: int,
-          has_premium?: bool,
-          booster_percent?: int,
-          skill_bonus_percent?: int,
-          avg_rp_per_battle?: number,
-          avg_battle_minutes?: number,
-          recent_battles?: [{ rp, minutes, premium?, booster_percent?, skill_bonus_percent? }, ...max5],
-          progress?: { "<id>": { rp_current?: int, done?: bool }, ... }
-        }
+        Cascade RP/time estimate across prerequisites (folders + edges)
+        ---
+        tags:
+          - calc
+        consumes:
+          - application/json
+        parameters:
+          - in: body
+            name: payload
+            required: true
+            schema:
+              type: object
+              properties:
+                vehicle_id: {type: integer, example: 1}
+                has_premium: {type: boolean, example: false}
+                booster_percent: {type: integer, example: 0}
+                skill_bonus_percent: {type: integer, example: 0}
+                avg_rp_per_battle: {type: number, example: 400}
+                avg_battle_minutes: {type: number, example: 9}
+                recent_battles:
+                  type: array
+                  maxItems: 5
+                  items:
+                    type: object
+                    properties:
+                      rp: {type: number, example: 1200}
+                      minutes: {type: number, example: 10}
+                      premium: {type: boolean, example: true}
+                      booster_percent: {type: integer, example: 50}
+                      skill_bonus_percent: {type: integer, example: 10}
+                progress:
+                  type: object
+                  additionalProperties:
+                    type: object
+                    properties:
+                      rp_current: {type: integer, example: 0}
+                      done: {type: boolean, example: false}
+        responses:
+          200:
+            description: OK
+          400:
+            description: Validation error
         """
         data = request.get_json(silent=True) or {}
         vehicle_id = int(data.get("vehicle_id") or 0)
@@ -519,6 +678,7 @@ def create_app() -> Flask:
 
         # progres użytkownika (z frontu)
         raw_prog = data.get("progress") or {}
+
         def get_prog(vid: int) -> Tuple[int, bool]:
             p = raw_prog.get(str(vid)) or raw_prog.get(int(vid)) or {}
             rp_cur = int(p.get("rp_current") or 0)
@@ -539,15 +699,17 @@ def create_app() -> Flask:
                 rp_rem = 0 if done else max(0, rp_total - rp_cur)
                 if rp_rem > 0:
                     total_remaining += rp_rem
-                breakdown.append({
-                    "id": v.id,
-                    "name": v.name,
-                    "rank": v.rank_id,
-                    "rp_cost": rp_total,
-                    "rp_current": int(rp_cur),
-                    "rp_remaining": int(rp_rem),
-                    "done": bool(done),
-                })
+                breakdown.append(
+                    {
+                        "id": v.id,
+                        "name": v.name,
+                        "rank": v.rank_id,
+                        "rp_cost": rp_total,
+                        "rp_current": int(rp_cur),
+                        "rp_remaining": int(rp_rem),
+                        "done": bool(done),
+                    }
+                )
 
         if total_remaining == 0:
             battles = 0
@@ -562,22 +724,24 @@ def create_app() -> Flask:
         hours = None if minutes is None else round(minutes / 60.0, 2)
         ge_cost_by_rate = int(math.ceil(total_remaining / 45.0)) if total_remaining > 0 else 0
 
-        return jsonify({
-            "target": {"id": target.id, "name": target.name},
-            "base_from_recent": {
-                "avg_rp_per_battle": round(avg_rp, 2),
-                "avg_battle_minutes": round(avg_min, 2),
-                "samples": samples,
-            },
-            "effective_rp_per_battle": effective,
-            "required_ids": list(required_ids),
-            "breakdown": breakdown,
-            "rp_total_remaining": int(total_remaining),
-            "battles_needed": battles,
-            "minutes_needed": minutes,
-            "hours_needed": hours,
-            "ge_cost_by_rate": ge_cost_by_rate,
-        })
+        return jsonify(
+            {
+                "target": {"id": target.id, "name": target.name},
+                "base_from_recent": {
+                    "avg_rp_per_battle": round(avg_rp, 2),
+                    "avg_battle_minutes": round(avg_min, 2),
+                    "samples": samples,
+                },
+                "effective_rp_per_battle": effective,
+                "required_ids": list(required_ids),
+                "breakdown": breakdown,
+                "rp_total_remaining": int(total_remaining),
+                "battles_needed": battles,
+                "minutes_needed": minutes,
+                "hours_needed": hours,
+                "ge_cost_by_rate": ge_cost_by_rate,
+            }
+        )
 
     # --- Importer JSON ---
     @app.post("/api/import")

@@ -51,9 +51,6 @@ export default function App() {
   const [calcLoading, setCalcLoading] = useState(false)
   const [calcError, setCalcError] = useState<string | null>(null)
 
-  const base = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '')
-  const apiRoot = base.endsWith('/api') ? base : `${base}/api`
-
   // progres (do kaskady i per-user)
   const progress = useProgress()
 
@@ -113,7 +110,7 @@ export default function App() {
     [tree]
   )
 
-  // tylko pojazdy badalne
+  // tylko pojazdy badalne (dla selektora w kalkulatorze)
   const researchableVehicles = useMemo(
     () => ((tree?.nodes ?? []) as Vehicle[]).filter(v => v.type === 'tree'),
     [tree]
@@ -125,12 +122,8 @@ export default function App() {
       setCalcVehicleId('')
       return
     }
-    const isValid =
-      calcVehicleId &&
-      researchableVehicles.some(v => v.id === Number(calcVehicleId))
-    if (!isValid) {
-      setCalcVehicleId(researchableVehicles[0].id)
-    }
+    const isValid = !!calcVehicleId && researchableVehicles.some(v => v.id === Number(calcVehicleId))
+    if (!isValid) setCalcVehicleId(researchableVehicles[0].id)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [researchableVehicles, nation, vclass])
 
@@ -142,7 +135,6 @@ export default function App() {
       setHighlightIds([])
       setSearchError(null)
       setSearchLoading(false)
-      // domyślnie pierwszy badalny
       if (!calcVehicleId && researchableVehicles.length) {
         setCalcVehicleId(researchableVehicles[0].id)
       }
@@ -151,16 +143,15 @@ export default function App() {
     setSearchLoading(true)
     searchDebounce.current = window.setTimeout(async () => {
       try {
-        const url = `${apiRoot}/vehicles?nation=${encodeURIComponent(nation)}&class=${encodeURIComponent(vclass)}&q=${encodeURIComponent(q)}&exclude_variants=0`
-        const res = await fetch(url)
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
-        const arr: Vehicle[] = await res.json()
+        const arr = await api.vehicles({
+          nation,
+          class: vclass,
+          q,
+          exclude_variants: false // do highlightów chcemy wszystkie trafienia
+        })
+        setHighlightIds(arr.map(v => v.id))
 
-        // 1) podświetlanie — wszystkie trafienia (niezależnie od typu)
-        const idsAll = arr.map(v => v.id)
-        setHighlightIds(idsAll)
-
-        // 2) jeśli nie wybrano pojazdu do kalkulatora — zaproponuj pierwsze BADALNE trafienie
+        // dla kalkulatora proponuj pierwsze BADALNE trafienie
         if (!calcVehicleId) {
           const firstResearchableHit = arr.find(v => v.type === 'tree')
           if (firstResearchableHit) setCalcVehicleId(firstResearchableHit.id)
@@ -256,15 +247,7 @@ export default function App() {
 
     try {
       setCalcLoading(true)
-      let url = `${apiRoot}/calc/estimate`
-      let payload: any = {
-        vehicle_id: vehicleId,
-        rp_current: Number(rpCurrent || 0),
-        ...commonPayload,
-      }
-
       if (cascade) {
-        url = `${apiRoot}/calc/cascade`
         // progres z hooka (per user) + opcjonalna ręczna korekta dla targetu
         const prog: Record<number, { rp_current: number; done: boolean }> = {}
         for (const v of (tree?.nodes ?? []) as Vehicle[]) {
@@ -272,17 +255,16 @@ export default function App() {
           const done = progress.getDone(v.id)
           if (cur > 0 || done) prog[v.id] = { rp_current: cur, done }
         }
-        payload = { vehicle_id: vehicleId, progress: prog, ...commonPayload }
+        const json = await api.calcCascade({ vehicle_id: vehicleId, progress: prog, ...commonPayload })
+        setCalcResult(json)
+      } else {
+        const json = await api.calcEstimate({
+          vehicle_id: vehicleId,
+          rp_current: Number(rpCurrent || 0),
+          ...commonPayload,
+        })
+        setCalcResult(json)
       }
-
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      })
-      const json = await res.json()
-      if (!res.ok) throw new Error(json?.error || `HTTP ${res.status}`)
-      setCalcResult(json)
     } catch (e: any) {
       setCalcError(e?.message ?? String(e))
     } finally {
