@@ -5,7 +5,7 @@ import TreeCanvas from '@/components/TreeCanvas'
 import PremiumShelf from '@/components/PremiumShelf'
 import { setProgressPersistence, useProgress, setProgressUser } from '@/useProgress'
 
-type RecentRow = { rp: string | number; minutes: string | number; premium: boolean; booster: string | number }
+type RecentRow = { rp: string | number; minutes: string | number }
 
 export default function App() {
   const [nations, setNations] = useState<Nation[]>([])
@@ -30,19 +30,22 @@ export default function App() {
   const [highlightIds, setHighlightIds] = useState<number[]>([])
   const [filterMatches, setFilterMatches] = useState(false)
 
-  // kalkulator (pojedynczy i kaskadowy)
+  // kalkulator
   const [calcVehicleId, setCalcVehicleId] = useState<number | ''>('')
   const [rpCurrent, setRpCurrent] = useState<number | ''>('') // ręczna korekta dla targetu
-  const [avgRp, setAvgRp] = useState<number | ''>('')
+
+  // tryb średniej
+  const [useRecent, setUseRecent] = useState(true)
+  const [recent, setRecent] = useState<RecentRow[]>(
+    Array.from({ length: 5 }, () => ({ rp: '', minutes: '' }))
+  )
+  const [avgRp, setAvgRp] = useState<number | ''>('')      // gdy useRecent = false
   const [avgMinutes, setAvgMinutes] = useState<number | ''>(9)
+
+  // prognoza (globalnie – bez wierszy)
   const [hasPremium, setHasPremium] = useState(false)
   const [booster, setBooster] = useState<number | ''>('')
   const [skillBonus, setSkillBonus] = useState<number | ''>('')
-
-  const [useRecent, setUseRecent] = useState(true)
-  const [recent, setRecent] = useState<RecentRow[]>(
-    Array.from({ length: 5 }, () => ({ rp: '', minutes: '', premium: false, booster: '' }))
-  )
 
   // KASKADA
   const [cascade, setCascade] = useState(false)
@@ -62,7 +65,7 @@ export default function App() {
       api.me()
         .then((r) => {
           setAuthUser({ id: r.user.id, email: r.user.email })
-          setProgressUser(r.user.id)          // progres per user
+          setProgressUser(r.user.id)
           setProgressPersistence(true)
         })
         .catch(() => {
@@ -110,13 +113,11 @@ export default function App() {
     [tree]
   )
 
-  // tylko pojazdy badalne (dla selektora w kalkulatorze)
   const researchableVehicles = useMemo(
     () => ((tree?.nodes ?? []) as Vehicle[]).filter(v => v.type === 'tree'),
     [tree]
   )
 
-  // jeśli bieżący wybór nie jest badalny / brak, ustaw pierwszy badalny
   useEffect(() => {
     if (!researchableVehicles.length) {
       setCalcVehicleId('')
@@ -147,16 +148,13 @@ export default function App() {
           nation,
           class: vclass,
           q,
-          exclude_variants: false // do highlightów chcemy wszystkie trafienia
+          exclude_variants: false
         })
         setHighlightIds(arr.map(v => v.id))
-
-        // dla kalkulatora proponuj pierwsze BADALNE trafienie
         if (!calcVehicleId) {
           const firstResearchableHit = arr.find(v => v.type === 'tree')
           if (firstResearchableHit) setCalcVehicleId(firstResearchableHit.id)
         }
-
         setSearchError(null)
       } catch (e: any) {
         setSearchError(e?.message ?? String(e))
@@ -167,29 +165,34 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [q, nation, vclass])
 
-  // pomocnicze (podgląd 5 bitew na kliencie)
-  function normalizeRP(rp: number, prem: boolean, boosterPct: number) {
-    let denom = 1.0
-    if (prem) denom *= 2.0
-    if (Number.isFinite(boosterPct) && boosterPct > -100) denom *= (1 + boosterPct / 100)
-    return denom > 0 ? rp / denom : rp
+  // --------- PODGLĄD 5 BITEW ----------
+  function forecastMultiplier(hasPrem: boolean, boosterPct: number | '' , skillPct: number | '') {
+    let m = 1.0
+    if (hasPrem) m *= 2.0
+    const b = typeof boosterPct === 'number' ? boosterPct : Number(boosterPct)
+    const s = typeof skillPct === 'number' ? skillPct : Number(skillPct)
+    if (Number.isFinite(b)) m *= (1 + Number(b) / 100)
+    if (Number.isFinite(s)) m *= (1 + Number(s) / 100)
+    return m
   }
+
   const recentPreview = useMemo(() => {
     const rows = recent
       .map(r => ({
         rp: Number(r.rp || 0),
         minutes: Number(r.minutes || 0),
-        premium: !!r.premium,
-        booster: Number(r.booster || 0)
       }))
       .filter(r => r.rp > 0)
 
-    if (rows.length === 0) return { avgBaseRP: 0, avgMin: 0, count: 0 }
-    const baseSum = rows.reduce((acc, r) => acc + normalizeRP(r.rp, r.premium, r.booster), 0)
+    if (rows.length === 0) return { avgBaseRP: 0, avgEffRP: 0, avgMin: 0, count: 0 }
+
+    const baseAvg = rows.reduce((acc, r) => acc + r.rp, 0) / rows.length
     const minRows = rows.filter(r => r.minutes > 0)
     const minAvg = minRows.length ? minRows.reduce((a, r) => a + r.minutes, 0) / minRows.length : 0
-    return { avgBaseRP: baseSum / rows.length, avgMin: minAvg, count: rows.length }
-  }, [recent])
+
+    const eff = baseAvg * forecastMultiplier(hasPremium, booster, skillBonus)
+    return { avgBaseRP: baseAvg, avgEffRP: eff, avgMin: minAvg, count: rows.length }
+  }, [recent, hasPremium, booster, skillBonus])
 
   // auth actions
   async function doLogin(kind: 'login' | 'register') {
@@ -198,7 +201,7 @@ export default function App() {
       setAuthToken(res.token)
       sessionStorage.setItem('gt_jwt', res.token)
       setAuthUser({ id: res.user.id, email: res.user.email })
-      setProgressUser(res.user.id)     // namespace progresu
+      setProgressUser(res.user.id)
       setProgressPersistence(true)
       setEmail(''); setPassword('')
     } catch (e: any) {
@@ -210,7 +213,7 @@ export default function App() {
     setAuthToken(null)
     sessionStorage.removeItem('gt_jwt')
     setAuthUser(null)
-    setProgressUser(null)              // reset namespace
+    setProgressUser(null)
     setProgressPersistence(false)
   }
 
@@ -235,8 +238,6 @@ export default function App() {
         .map(r => ({
           rp: r.rp === '' ? 0 : Number(r.rp),
           minutes: r.minutes === '' ? 0 : Number(r.minutes),
-          premium: !!r.premium,
-          booster_percent: r.booster === '' ? 0 : Number(r.booster)
         }))
         .filter((r: any) => r.rp > 0 || r.minutes > 0)
         .slice(0, 5)
@@ -248,7 +249,6 @@ export default function App() {
     try {
       setCalcLoading(true)
       if (cascade) {
-        // progres z hooka (per user) + opcjonalna ręczna korekta dla targetu
         const prog: Record<number, { rp_current: number; done: boolean }> = {}
         for (const v of (tree?.nodes ?? []) as Vehicle[]) {
           const cur = v.id === vehicleId && rpCurrent !== '' ? Number(rpCurrent) : progress.getRP(v.id)
@@ -266,13 +266,11 @@ export default function App() {
         setCalcResult(json)
       }
     } catch (e: any) {
-      setCalcError(e?.message ?? String(e))
+      setCalcError(e?.message ?? e?.toString?.() ?? 'Błąd')
     } finally {
       setCalcLoading(false)
     }
   }
-
-  const allTreeVehicles = useMemo(() => (tree?.nodes ?? []).filter(n => n.type === 'tree') as Vehicle[], [tree])
 
   return (
     <div className="min-h-screen bg-neutral-900 text-neutral-100">
@@ -412,15 +410,13 @@ export default function App() {
                 <>
                   <div className="rounded-lg border border-white/10 divide-y divide-white/10 mb-2">
                     <div className="grid grid-cols-12 gap-2 px-2 py-2 text-xs opacity-70">
-                      <div className="col-span-4">RP</div>
-                      <div className="col-span-3">Minuty</div>
-                      <div className="col-span-3">Booster %</div>
-                      <div className="col-span-2">Premium</div>
+                      <div className="col-span-6">RP</div>
+                      <div className="col-span-6">Minuty</div>
                     </div>
                     {recent.map((row, i) => (
                       <div key={i} className="grid grid-cols-12 gap-2 px-2 py-2">
                         <input
-                          className="col-span-4 rounded bg-neutral-900 border border-white/15 px-2 py-1 text-sm"
+                          className="col-span-6 rounded bg-neutral-900 border border-white/15 px-2 py-1 text-sm"
                           type="number" min={0}
                           value={String(row.rp)}
                           onChange={(e) => {
@@ -428,37 +424,29 @@ export default function App() {
                           }}
                         />
                         <input
-                          className="col-span-3 rounded bg-neutral-900 border border-white/15 px-2 py-1 text-sm"
+                          className="col-span-6 rounded bg-neutral-900 border border-white/15 px-2 py-1 text-sm"
                           type="number" min={0}
                           value={String(row.minutes)}
                           onChange={(e) => {
                             const cp = [...recent]; cp[i] = { ...cp[i], minutes: e.target.value === '' ? '' : Number(e.target.value) }; setRecent(cp)
                           }}
                         />
-                        <input
-                          className="col-span-3 rounded bg-neutral-900 border border-white/15 px-2 py-1 text-sm"
-                          type="number" min={0}
-                          value={String(row.booster)}
-                          onChange={(e) => {
-                            const cp = [...recent]; cp[i] = { ...cp[i], booster: e.target.value === '' ? '' : Number(e.target.value) }; setRecent(cp)
-                          }}
-                        />
-                        <label className="col-span-2 flex items-center gap-2 text-sm">
-                          <input
-                            type="checkbox" className="accent-emerald-400"
-                            checked={row.premium}
-                            onChange={(e) => { const cp = [...recent]; cp[i] = { ...cp[i], premium: e.target.checked }; setRecent(cp) }}
-                          />
-                          <span className="opacity-80">tak</span>
-                        </label>
                       </div>
                     ))}
                   </div>
 
-                  <div className="text-xs opacity-80 mb-3">
-                    Średnia z {recentPreview.count || 0} bitew (po zdjęciu bonusów):{' '}
-                    <b>{recentPreview.avgBaseRP ? Math.round(recentPreview.avgBaseRP) : 0} RP</b> / bitwę •{' '}
-                    <b>{recentPreview.avgMin ? recentPreview.avgMin.toFixed(1) : 0} min</b> / bitwę
+                  <div className="text-xs opacity-80 mb-3 space-y-0.5">
+                    <div>
+                      <span className="opacity-70">Efektywne RP/bitwę (prognoza): </span>
+                      <b>{recentPreview.avgEffRP ? Math.round(recentPreview.avgEffRP) : 0} RP</b>
+                    </div>
+                    <div className="opacity-70">
+                      Bazowe z wpisów: {recentPreview.avgBaseRP ? Math.round(recentPreview.avgBaseRP) : 0} RP
+                    </div>
+                    <div>
+                      <span className="opacity-70">Śr. min/bitwę:</span>{' '}
+                      <b>{recentPreview.avgMin ? recentPreview.avgMin.toFixed(1) : 0}</b> • próbki: {recentPreview.count}
+                    </div>
                   </div>
                 </>
               ) : (
@@ -520,7 +508,6 @@ export default function App() {
                 </label>
               </div>
 
-              {/* ręczna korekta RP tylko dla wybranego wozu (gdy ktoś chce) */}
               {!cascade && (
                 <div className="grid grid-cols-2 gap-3 mt-3">
                   <div>
@@ -570,20 +557,6 @@ export default function App() {
                         <span className="opacity-70">Koszt wg 1GE=45RP:</span>{' '}
                         {(calcResult?.ge_cost_by_rate ?? 0).toLocaleString('pl-PL')} GE
                       </div>
-
-                      {Array.isArray(calcResult?.breakdown) && calcResult.breakdown.length > 0 && (
-                        <div className="pt-2">
-                          <div className="opacity-70 mb-1">Rozpiska:</div>
-                          <ul className="list-disc list-inside space-y-0.5">
-                            {calcResult.breakdown.map((b: any) => (
-                              <li key={b.id}>
-                                {b.name} — {b.rp_current?.toLocaleString?.('pl-PL') ?? b.rp_current}/{b.rp_cost?.toLocaleString?.('pl-PL') ?? b.rp_cost} RP
-                                {b.done ? ' (✓)' : b.rp_remaining ? ` • zostaje ${b.rp_remaining.toLocaleString?.('pl-PL') ?? b.rp_remaining}` : ''}
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
-                      )}
                     </>
                   ) : (
                     <>
@@ -595,7 +568,7 @@ export default function App() {
                       </div>
                       {calcResult?.base_from_recent?.samples ? (
                         <div className="opacity-80">
-                          <span className="opacity-70">Średnie (bazowe) z 5 bitew:</span>{' '}
+                          <span className="opacity-70">Średnie z 5 bitew:</span>{' '}
                           {Math.round(calcResult.base_from_recent.avg_rp_per_battle)} RP •{' '}
                           {calcResult.base_from_recent.avg_battle_minutes} min
                         </div>

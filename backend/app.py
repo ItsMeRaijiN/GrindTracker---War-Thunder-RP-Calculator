@@ -203,12 +203,15 @@ def create_app() -> Flask:
     def averages_from_recent(data: Dict[str, Any]) -> Tuple[float, float, int]:
         """
         Zwraca (avg_base_rp_per_battle, avg_minutes_per_battle, samples)
-        gdzie "base" = bez bonusów z podanych bitew.
+        Teraz 'recent_battles' zawiera tylko: rp, minutes (bez premium/booster).
         """
         recent = data.get("recent_battles") or []
-        base_rps: List[float] = []
+        rows = recent[:5] if isinstance(recent, list) else []
+
+        rp_vals: List[float] = []
         mins: List[float] = []
-        for it in (recent[:5] if isinstance(recent, list) else []):
+
+        for it in rows:
             try:
                 rp_val = max(0.0, float(it.get("rp", 0)))
             except Exception:
@@ -217,30 +220,15 @@ def create_app() -> Flask:
                 m_val = max(0.0, float(it.get("minutes", 0)))
             except Exception:
                 m_val = 0.0
-            prem = bool(it.get("premium") or False)
-            bperc = it.get("booster_percent")
-            sperc = it.get("skill_bonus_percent")
-            denom = 1.0
-            if prem:
-                denom *= PREMIUM_RP_MULT
-            if bperc is not None:
-                try:
-                    denom *= 1.0 + float(bperc) / 100.0
-                except Exception:
-                    pass
-            if sperc is not None:
-                try:
-                    denom *= 1.0 + float(sperc) / 100.0
-                except Exception:
-                    pass
+
             if rp_val > 0:
-                base_rps.append(rp_val / max(denom, 1e-9))
+                rp_vals.append(rp_val)
             if m_val > 0:
                 mins.append(m_val)
 
-        avg_rp = sum(base_rps) / len(base_rps) if base_rps else 0.0
-        avg_min = sum(mins) / len(mins) if mins else 9.0
-        return avg_rp, avg_min, len(base_rps)
+        avg_rp = (sum(rp_vals) / len(rp_vals)) if rp_vals else 0.0
+        avg_min = (sum(mins) / len(mins)) if mins else 9.0
+        return avg_rp, avg_min, len(rp_vals)
 
     # ---------- ROUTES ----------
     @app.get("/")
